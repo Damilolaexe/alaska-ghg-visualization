@@ -1,0 +1,206 @@
+# ==========================================================
+# Chapter 1 — Data Exploration & Visualization (Alaska GHG)
+# EPA SIT-based historical analysis (1990–2022)
+# Author: Your Name | Date: YYYY-MM-DD
+# ==========================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(scales)
+})
+
+# -----------------------------
+# 0) Paths and setup
+# -----------------------------
+DATA_PATH  <- "data/alaska_ghg_master.csv"   # <-- update if needed
+OUT_DIR    <- "output"
+PLOT_DIR   <- file.path(OUT_DIR, "plots")
+TAB_DIR    <- file.path(OUT_DIR, "tables")
+
+dir.create(OUT_DIR,  showWarnings = FALSE, recursive = TRUE)
+dir.create(PLOT_DIR, showWarnings = FALSE, recursive = TRUE)
+dir.create(TAB_DIR,  showWarnings = FALSE, recursive = TRUE)
+
+# -----------------------------
+# 1) Load data
+# -----------------------------
+ghg_raw <- read_csv(DATA_PATH, show_col_types = FALSE) %>%
+  janitor::clean_names()
+
+# Expect: year, sector, gas, emissions_mtco2e
+stopifnot(all(c("year","sector","gas","emissions_mtco2e") %in% names(ghg_raw)))
+
+ghg <- ghg_raw %>%
+  mutate(
+    year   = as.integer(year),
+    sector = as.factor(sector),
+    gas    = as.factor(gas),
+    emissions_mtco2e = as.numeric(emissions_mtco2e)
+  ) %>%
+  arrange(year, sector, gas)
+
+# Optional: filter to Alaska years only if extra rows exist
+# ghg <- ghg %>% filter(year >= 1990, year <= 2022)
+
+# -----------------------------
+# 2) Helper functions
+# -----------------------------
+# Filter by sectors and years
+filter_ghg <- function(data, sectors = NULL, years = NULL) {
+  out <- data
+  if (!is.null(sectors)) out <- out %>% filter(sector %in% sectors)
+  if (!is.null(years))   out <- out %>% filter(year %in% years)
+  out
+}
+
+# Compute percent change relative to a base year
+percent_change_from <- function(data, base_year) {
+  base_tbl <- data %>%
+    filter(year == base_year) %>%
+    group_by(sector) %>%
+    summarise(base = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop")
+
+  data %>%
+    group_by(year, sector) %>%
+    summarise(total = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop") %>%
+    left_join(base_tbl, by = "sector") %>%
+    mutate(pct_change = (total - base) / base) %>%
+    arrange(sector, year)
+}
+
+# Five-year interval selector (e.g., 1990, 1995, ..., 2020)
+select_5yr_ticks <- function(start = 1990, end = 2022) {
+  seq(start, end, by = 5)
+}
+
+# -----------------------------
+# 3) Summary tables
+# -----------------------------
+
+# 3a) Mean emissions by sector (full record)
+mean_by_sector <- ghg %>%
+  group_by(sector) %>%
+  summarise(mean_emissions = mean(emissions_mtco2e, na.rm = TRUE),
+            sd_emissions   = sd(emissions_mtco2e,   na.rm = TRUE),
+            min_emissions  = min(emissions_mtco2e,  na.rm = TRUE),
+            max_emissions  = max(emissions_mtco2e,  na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(desc(mean_emissions))
+write_csv(mean_by_sector, file.path(TAB_DIR, "mean_by_sector.csv"))
+
+# 3b) Total emissions by year (all sectors, all gases)
+total_by_year <- ghg %>%
+  group_by(year) %>%
+  summarise(total_emissions = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop")
+write_csv(total_by_year, file.path(TAB_DIR, "total_by_year.csv"))
+
+# 3c) Mean emissions by gas
+mean_by_gas <- ghg %>%
+  group_by(gas) %>%
+  summarise(mean_emissions = mean(emissions_mtco2e, na.rm = TRUE),
+            sd_emissions   = sd(emissions_mtco2e,   na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(desc(mean_emissions))
+write_csv(mean_by_gas, file.path(TAB_DIR, "mean_by_gas.csv"))
+
+# 3d) Sector totals by year (for stacked plots)
+sector_trend <- ghg %>%
+  group_by(year, sector) %>%
+  summarise(total = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop")
+write_csv(sector_trend, file.path(TAB_DIR, "sector_totals_by_year.csv"))
+
+# 3e) Gas totals by year (for gas trend plot)
+gas_trend <- ghg %>%
+  group_by(year, gas) %>%
+  summarise(total = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop")
+write_csv(gas_trend, file.path(TAB_DIR, "gas_totals_by_year.csv"))
+
+# 3f) Percent change from a base year (e.g., 2005)
+pct_change_2005 <- percent_change_from(ghg, base_year = 2005)
+write_csv(pct_change_2005, file.path(TAB_DIR, "pct_change_from_2005_by_sector.csv"))
+
+# 3g) Selected years table (5-yr intervals)
+sel_years <- select_5yr_ticks(1990, 2022)
+selected_years_tbl <- ghg %>%
+  filter(year %in% sel_years) %>%
+  group_by(year, sector) %>%
+  summarise(total = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop") %>%
+  arrange(year, sector)
+write_csv(selected_years_tbl, file.path(TAB_DIR, "sector_totals_selected_years.csv"))
+
+# -----------------------------
+# 4) Visualizations
+# -----------------------------
+
+# 4a) Total emissions over time
+p_total <- ggplot(total_by_year, aes(x = year, y = total_emissions)) +
+  geom_line(linewidth = 1.2) +
+  geom_point() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = sel_years) +
+  labs(title = "Alaska Total GHG Emissions (1990–2022)",
+       x = "Year", y = "Emissions (MtCO₂e)",
+       caption = "Source: EPA State Inventory Tool (SIT)") +
+  theme_minimal()
+ggsave(file.path(PLOT_DIR, "01_total_emissions.png"), p_total, width = 9, height = 5.5, dpi = 300)
+
+# 4b) Stacked area by sector
+p_sector <- ggplot(sector_trend, aes(x = year, y = total, fill = sector)) +
+  geom_area(alpha = 0.9) +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = sel_years) +
+  labs(title = "Emissions by Sector in Alaska (1990–2022)",
+       x = "Year", y = "Emissions (MtCO₂e)", fill = "Sector",
+       caption = "Source: EPA State Inventory Tool (SIT)") +
+  theme_minimal()
+ggsave(file.path(PLOT_DIR, "02_sector_stacked_area.png"), p_sector, width = 10, height = 6.5, dpi = 300)
+
+# 4c) Gas-specific trends
+p_gas <- ggplot(gas_trend, aes(x = year, y = total, color = gas)) +
+  geom_line(linewidth = 1.2) +
+  geom_point() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = sel_years) +
+  labs(title = "Emissions by Gas in Alaska (1990–2022)",
+       x = "Year", y = "Emissions (MtCO₂e)", color = "Gas",
+       caption = "Source: EPA State Inventory Tool (SIT)") +
+  theme_minimal()
+ggsave(file.path(PLOT_DIR, "03_gas_trends.png"), p_gas, width = 9, height = 5.5, dpi = 300)
+
+# 4d) Faceted sector lines (historical)
+p_facets <- ggplot(sector_trend, aes(x = year, y = total)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.3) +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = sel_years) +
+  facet_wrap(~ sector, scales = "free_y") +
+  labs(title = "Sectoral Emissions — Alaska (1990–2022)",
+       x = "Year", y = "Emissions (MtCO₂e)",
+       caption = "Source: EPA State Inventory Tool (SIT)") +
+  theme_minimal()
+ggsave(file.path(PLOT_DIR, "04_sector_facets.png"), p_facets, width = 11, height = 7, dpi = 300)
+
+# -----------------------------
+# 5) Example queries (saved)
+# -----------------------------
+
+# Transportation subset 2000–2020
+transport_2000_2020 <- ghg %>%
+  filter(sector == "Transportation", year >= 2000, year <= 2020) %>%
+  arrange(year, gas)
+write_csv(transport_2000_2020, file.path(TAB_DIR, "transport_2000_2020.csv"))
+
+# Top-5 average emitting sectors (1990–2022)
+top5_sectors <- mean_by_sector %>% slice_max(mean_emissions, n = 5)
+write_csv(top5_sectors, file.path(TAB_DIR, "top5_mean_emitting_sectors.csv"))
+
+# Selected snapshot table for report (1990, 2000, 2010, 2020, 2022)
+snapshot_years <- c(1990, 2000, 2010, 2020, 2022)
+snapshot_tbl <- ghg %>%
+  filter(year %in% snapshot_years) %>%
+  group_by(year, sector) %>%
+  summarise(total = sum(emissions_mtco2e, na.rm = TRUE), .groups = "drop") %>%
+  arrange(year, desc(total))
+write_csv(snapshot_tbl, file.path(TAB_DIR, "snapshot_sector_totals.csv"))
+
+message("Chapter 1 exploration complete. Tables written to 'output/tables', plots to 'output/plots'.")
